@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.1.1 — 2026-09-22
+
+- Fix: start under mcp 2.x (FastMCP was renamed to MCPServer). Supports mcp 1.2–2.x.
+
 ## 0.1.0 — 2026-09-22
 
 Initial release.

@@ -1,6 +1,6 @@
 [project]
 name = "tmux-agents"
-version = "0.1.0"
+version = "0.1.1"
 description = "MCP server that lets any AI agent launch, watch and steer coding agents (Claude Code, Codex, Hermes, aider, ...) running in tmux panes."
 readme = "README.md"
 requires-python = ">=3.10"
@@ -24,7 +24,7 @@ classifiers = [
   "Topic :: Terminals",
 ]
 dependencies = [
-  "mcp>=1.2.0",
+  "mcp>=1.2.0,<3",
 ]
 
 [project.urls]
