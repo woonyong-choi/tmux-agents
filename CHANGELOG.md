@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.2.0 — 2026-09-22
+
+- New: `tmux-agents hook` — a Stop hook that chains pipeline stages: when an agent ends its turn with `<STAGE> DONE`, the next stage's prompt is typed into the same pane. `STOPPED`, `PAUSE` and end-of-pipeline halt the chain and log for a human.
+
 ## 0.1.1 — 2026-09-22
 
 - Fix: start under mcp 2.x (FastMCP was renamed to MCPServer). Supports mcp 1.2–2.x.
