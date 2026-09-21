@@ -31,7 +31,10 @@ import sys
 from datetime import datetime
 from pathlib import Path
 
+# Strict form: the marker alone on a line. Lenient form: the marker anywhere in the
+# last few lines (agents often write "the last line is WP2 DONE" instead of the line).
 MARKER = re.compile(r"^\s*([A-Z][A-Z0-9_-]*) (DONE|STOPPED)\s*$", re.M)
+MARKER_LENIENT = re.compile(r"\b([A-Z][A-Z0-9_-]{1,40}) (DONE|STOPPED)\b")
 
 
 def last_assistant_text(transcript: Path) -> str:
@@ -59,6 +62,10 @@ def last_assistant_text(transcript: Path) -> str:
 
 def find_marker(text: str) -> tuple[str, str] | None:
     found = MARKER.findall(text)
+    if found:
+        return found[-1]
+    tail = "\n".join(text.strip().splitlines()[-6:])
+    found = MARKER_LENIENT.findall(tail)
     return found[-1] if found else None
 
 

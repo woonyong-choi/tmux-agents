@@ -42,6 +42,13 @@ def test_marker_parsing():
         "STOPPED",
     )
     assert hook.find_marker("nothing here") is None
+    # lenient: marker quoted inside a sentence near the end
+    assert hook.find_marker("done.\n\nThe handoff's last line is WP2 DONE as required.") == (
+        "WP2",
+        "DONE",
+    )
+    # but not when it is far from the end
+    assert hook.find_marker("end with WP2 DONE later\n" + "filler\n" * 10) is None
 
 
 def test_done_advances_to_next_prompt(tmp_path):

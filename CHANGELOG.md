@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.2.1 — 2026-09-22
+
+- hook: also accept a marker quoted inside a sentence within the last 6 lines (agents often write "the last line is WP2 DONE" rather than the bare line).
+
 ## 0.2.0 — 2026-09-22
 
 - Fix: `agents_launch` failed with `can't find window: 0` when tmux uses `base-index 1`; the window index is now looked up.
