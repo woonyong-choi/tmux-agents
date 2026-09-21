@@ -1,0 +1,12 @@
+{
+  "mcpServers": {
+    "tmux-agents": {
+      "command": "uvx",
+      "args": ["tmux-agents"],
+      "env": {
+        "TMUX_AGENTS_SESSION_PREFIX": "agents-",
+        "TMUX_AGENTS_OPEN_COMMAND": "open -na Ghostty.app --args -e tmux attach -t {session}"
+      }
+    }
+  }
+}
