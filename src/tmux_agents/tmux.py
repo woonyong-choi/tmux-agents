@@ -265,14 +265,17 @@ class Tmux:
         self.run("set-option", "-t", session, "pane-border-status", "top")
         self.run("set-option", "-t", session, "pane-border-format", " #{pane_title} ")
         self.run("set-option", "-t", session, "allow-rename", "off")
+        window = self.run(
+            "display-message", "-p", "-t", f"={session}", "#{session_name}:#{window_index}"
+        ).strip()
         for spec in agents[1:]:
-            self.run("split-window", "-t", f"{session}:0", "-c", spec.cwd or cwd)
-            self.run("select-layout", "-t", f"{session}:0", "tiled")
+            self.run("split-window", "-t", window, "-c", spec.cwd or cwd)
+            self.run("select-layout", "-t", window, "tiled")
 
         panes = self.panes(session)
         panes.sort(key=lambda p: p.index)
         chosen = self._pick_layout(layout, len(panes), panes[0])
-        self.run("select-layout", "-t", f"{session}:0", chosen)
+        self.run("select-layout", "-t", window, chosen)
         for pane, spec in zip(panes, agents, strict=False):
             self.run("select-pane", "-t", pane.id, "-T", spec.title)
             self.send(pane, spec.command, enter=True)

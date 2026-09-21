@@ -21,6 +21,10 @@ def tmux():
     socket = f"tmux-agents-test-{uuid.uuid4().hex[:8]}"
     settings = Settings(socket=socket, session_prefix="t-", max_lines=500, allow_kill=True)
     wrapper = Tmux(settings)
+    # users often set base-index 1; make the throwaway server do the same so we catch it
+    subprocess.run(["tmux", "-L", socket, "start-server"], capture_output=True)
+    subprocess.run(["tmux", "-L", socket, "set", "-g", "base-index", "1"], capture_output=True)
+    subprocess.run(["tmux", "-L", socket, "set", "-g", "pane-base-index", "1"], capture_output=True)
     yield wrapper
     subprocess.run(["tmux", "-L", socket, "kill-server"], capture_output=True)
 

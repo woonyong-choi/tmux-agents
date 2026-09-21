@@ -2,6 +2,7 @@
 
 ## 0.2.0 — 2026-09-22
 
+- Fix: `agents_launch` failed with `can't find window: 0` when tmux uses `base-index 1`; the window index is now looked up.
 - New: `tmux-agents hook` — a Stop hook that chains pipeline stages: when an agent ends its turn with `<STAGE> DONE`, the next stage's prompt is typed into the same pane. `STOPPED`, `PAUSE` and end-of-pipeline halt the chain and log for a human.
 
 ## 0.1.1 — 2026-09-22
