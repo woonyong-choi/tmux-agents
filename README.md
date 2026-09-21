@@ -14,7 +14,7 @@ That is the whole install. It needs `tmux` on the machine and nothing else.
 <code>
 ┌ WP1 Path ───────────────┬ WP2 Run ────────────────┐<br>
 │ claude --model sonnet   │ codex --model gpt-5     │<br>
-│ ✓ 87 tests passed       │ ? Overwrite main.ts? y/n│<br>
+│ 87 tests passed         │ ? Overwrite main.ts? y/n│<br>
 ├ WP3 Timeline ───────────┼ WP4 Diagrams ───────────┤<br>
 │ hermes chat -q "..."    │ aider --yes             │<br>
 └─────────────────────────┴─────────────────────────┘
