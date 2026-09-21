@@ -174,14 +174,14 @@ WP3|PAUSE            # stop here: a person or orchestrator decides what's next
 
 Paths are relative to the pipeline file.
 
-**3. Register the hook** in the repo the agents work in, `.claude/settings.json`:
+**3. Register the hook once, globally** — in `~/.claude/settings.json` (applies to every Claude Code session on the machine; in a repo with no matching pipeline stage the hook does nothing, so it is safe everywhere). Put it in a repo's own `.claude/settings.json` instead only if you want it scoped to that repo:
 
 ```json
 {
   "hooks": {
     "Stop": [
       {"hooks": [{"type": "command",
-                  "command": "tmux-agents hook --pipeline pipeline/manta.txt",
+                  "command": "tmux-agents hook --pipeline /abs/path/to/pipeline/manta.txt",
                   "timeout": 15}]}
     ]
   }

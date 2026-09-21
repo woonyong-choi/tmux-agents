@@ -14,10 +14,10 @@ Pipeline file (one stage per line, `#` comments allowed):
     WP2|prompts/wp3.md
     WP3|PAUSE
 
-Install in the repo the agents work in (`.claude/settings.json`):
+Install once, globally, in `~/.claude/settings.json` (or per repo in `.claude/settings.json`):
 
     {"hooks": {"Stop": [{"hooks": [{"type": "command",
-      "command": "tmux-agents hook --pipeline pipeline/manta.txt", "timeout": 15}]}]}}
+      "command": "tmux-agents hook --pipeline /abs/path/pipeline.txt", "timeout": 15}]}]}}
 """
 
 from __future__ import annotations
