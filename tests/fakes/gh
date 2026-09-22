@@ -1,0 +1,82 @@
+#!/usr/bin/env python3
+"""A stand-in for the `gh` CLI, backed by a directory instead of GitHub.
+
+Only what notify.py actually calls: gist view/edit and the two contents-API calls.
+The tests put this on PATH, so the code under test really runs `gh` through
+subprocess — the transport is exercised, only GitHub is replaced.
+"""
+
+import base64
+import json
+import os
+import pathlib
+import sys
+
+ROOT = pathlib.Path(os.environ["GH_FAKE_DIR"])
+ROOT.mkdir(parents=True, exist_ok=True)
+
+
+def fail(message):
+    print(message, file=sys.stderr)
+    raise SystemExit(1)
+
+
+def flag(argv, name):
+    return argv[argv.index(name) + 1] if name in argv else None
+
+
+def field(argv, key):
+    for i, arg in enumerate(argv):
+        if arg == "-f" and i + 1 < len(argv) and argv[i + 1].startswith(f"{key}="):
+            return argv[i + 1][len(key) + 1 :]
+    return None
+
+
+def main(argv):
+    (ROOT / "calls.log").open("a").write(" ".join(argv) + "\n")
+    if argv[:1] == ["gist"]:
+        gist_id = argv[2]
+        name = flag(argv, "--filename")
+        store = ROOT / "gists" / gist_id / name
+        if argv[1] == "view":
+            if not store.is_file():
+                fail("gist file not found")
+            sys.stdout.write(store.read_text())
+            return 0
+        if argv[1] == "edit":
+            source = pathlib.Path(argv[-1])
+            if not source.is_file():
+                fail(f"no such source file: {source}")
+            store.parent.mkdir(parents=True, exist_ok=True)
+            store.write_text(source.read_text())
+            return 0
+        fail(f"unsupported gist subcommand: {argv[1]}")
+    if argv[:1] == ["api"]:
+        endpoint = argv[-1] if "-X" not in argv else argv[argv.index("-X") + 2]
+        store = ROOT / "repo" / endpoint.split("/contents/", 1)[1]
+        if "-X" not in argv:
+            if not store.is_file():
+                fail("404 Not Found")
+            body = store.read_bytes()
+            print(
+                json.dumps(
+                    {
+                        "sha": f"sha-{len(body)}",
+                        "content": base64.b64encode(body).decode(),
+                    }
+                )
+            )
+            return 0
+        content = field(argv, "content")
+        sha = field(argv, "sha")
+        if store.is_file() and sha != f"sha-{len(store.read_bytes())}":
+            fail("409 conflict: stale sha")
+        store.parent.mkdir(parents=True, exist_ok=True)
+        store.write_bytes(base64.b64decode(content))
+        (ROOT / "commits.log").open("a").write(field(argv, "message") + "\n")
+        return 0
+    fail(f"unsupported command: {argv}")
+
+
+if __name__ == "__main__":
+    raise SystemExit(main(sys.argv[1:]))

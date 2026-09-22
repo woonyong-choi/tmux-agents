@@ -78,9 +78,19 @@ somewhere an orchestrator that *cannot* see this machine can read it. See
 | `agents_launch` | Create a session with one pane per agent, title each pane, run each command, pick a layout that fits (side-by-side for 2, tiled for 3+), optionally open it in your terminal app |
 | `panes_list` | Panes with title, cwd, running command, size |
 | `pane_read` | Last N lines of a pane, ANSI stripped, secrets redacted; `since` reads only what is new |
+| `pane_scroll` | Page back through scrollback: `lines` lines ending `offset` lines above the bottom |
+| `pane_exec` | Run a shell command in a pane and get back only *its* output and exit code |
 | `pane_wait` | Block until a pane is quiet *and* idle, or a regex appears in new output — returns `idle` / `matched` / `running` / `timeout` plus the tail |
 | `pane_send` | Type text (literally, multi-line safe) and press Enter; optionally wait for a regex in the same call |
+| `pane_send_many` | Type the same text into several panes at once |
+| `pane_wait_any` / `pane_wait_all` | Watch several panes: return on the first to settle, or when all have |
+| `pane_clear` | Blank the screen *and* drop the scrollback (`clear` alone keeps it) |
 | `pane_key` | Send `C-c`, `Escape`, `Up`, `Tab` … |
+| `pane_add` | Add one more agent to a running session: split, title, start, rearrange |
+| `pane_resize` / `pane_zoom` / `pane_swap` | Give one pane room, blow it up to fill the window, or swap two positions |
+| `layout_set` | Rearrange every pane: tiled, even-horizontal, even-vertical, main-vertical, main-horizontal |
+| `window_list` / `window_new` / `window_kill` / `window_rename` | Windows (tabs) inside a session |
+| `session_attach_cmd` | The exact command a human types to watch the session |
 | `pane_kill` / `session_kill` | Stop one agent or the whole batch (can be disabled) |
 | `events_read` | Read turn-end events written by the hook (`since_line` reads only what is new) — wait on finished turns instead of polling panes |
 
@@ -250,6 +260,30 @@ takes either shape and normalizes both, so a pipeline can mix Claude Code and Co
 side: [`examples/claude_settings.json`](examples/claude_settings.json) and
 [`examples/codex_config.toml`](examples/codex_config.toml). Any other agent that runs a command at
 the end of a turn works too; it only needs to hand over `{"transcript_path": ...}` on stdin.
+
+### The conductor pane
+
+A pipeline entry does not have to be a prompt file. Written as
+`@pane:<title|id>: <sentence>`, it tells the hook to type that sentence into
+*another* pane — the one where a conductor (you, or an orchestrating agent) is
+sitting:
+
+```
+WP-F|prompts/wp-g.md
+WP-G|@pane:orchestrator: WP-G done. verify ~/woon-work/WP-G/handoff.md
+WP-H|PAUSE
+```
+
+When the WP-G worker prints `WP-G DONE`, the hook types that sentence into the pane
+titled `orchestrator` and the conductor's own turn starts — no polling, no waiting
+tool call, no cloud round trip. It works the same whether the conductor is Claude
+Code, Codex or a human at a shell prompt, because all three are just a pane that
+receives keystrokes. The pane is matched the way every other pane argument is: id
+(`%3`), target (`batch:0.1`), then exact and partial title. Note the space after
+the pane name — that colon-space is what separates the pane from the sentence.
+
+If no pane matches, nothing is typed and the log says so; the event still goes out
+with `next=@pane:<name>`, so the chain never hangs silently.
 
 ### The event log
 

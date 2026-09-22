@@ -17,7 +17,9 @@ Pipeline file (one stage per line, `#` comments allowed):
     # <marker>|<prompt file, relative to the pipeline file>
     WP1|prompts/wp2.md
     WP2|prompts/wp3.md
-    WP3|PAUSE
+    # or hand the baton to a conductor pane instead of carrying on in this one:
+    WP3|@pane:orchestrator: WP3 done. check ~/wp/WP-3/handoff.md
+    WP4|PAUSE
 
 Claude Code — `~/.claude/settings.json` (or a repo's `.claude/settings.json`):
 
@@ -51,6 +53,10 @@ from . import events, notify
 # last few lines (agents often write "the last line is WP2 DONE" instead of the line).
 MARKER = re.compile(r"^\s*([A-Z][A-Z0-9_-]*) (DONE|STOPPED)\s*$", re.M)
 MARKER_LENIENT = re.compile(r"\b([A-Z][A-Z0-9_-]{1,40}) (DONE|STOPPED)\b")
+
+# `@pane:<title|id>: <sentence>` — type the sentence into *another* pane (the
+# conductor), instead of typing the next prompt into this one.
+PANE_TARGET = re.compile(r"^@pane:(?P<pane>.+?):\s+(?P<text>.+)$", re.S)
 
 # A handoff path as agents write it: `~/woon-work/WP-J/handoff.md`, `docs/handoff.md`.
 HANDOFF = re.compile(r"(?:~|\.{0,2}/)?[\w.@+/-]*handoff\.md", re.I)
@@ -103,6 +109,45 @@ def next_stage(pipeline: Path, stage: str) -> str | None:
         name, target = (s.strip() for s in line.split("|", 1))
         if name == stage:
             return target
+    return None
+
+
+def resolve_pane(spec: str) -> str | None:
+    """A pane id for `%3`, `sess:0.1` or a pane title (exact, then case-insensitive).
+
+    The hook runs inside the pane it was triggered from, so plain `tmux` — which
+    follows `$TMUX` — is already pointed at the right server.
+    """
+    spec = spec.strip()
+    if not spec:
+        return None
+    try:
+        done = subprocess.run(
+            [
+                "tmux",
+                "list-panes",
+                "-a",
+                "-F",
+                "#{pane_id}\t#{session_name}:#{window_index}.#{pane_index}\t#{pane_title}",
+            ],
+            capture_output=True,
+            text=True,
+            timeout=3,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if done.returncode != 0:
+        return None
+    rows = [line.split("\t") for line in (done.stdout or "").splitlines() if "\t" in line]
+    for pane_id, target, _title in rows:
+        if spec in (pane_id, target):
+            return pane_id
+    for pane_id, _target, title in rows:
+        if title == spec:
+            return pane_id
+    for pane_id, _target, title in rows:
+        if spec.lower() in title.lower():
+            return pane_id
     return None
 
 
@@ -169,6 +214,33 @@ def build_event(agent: str, message: str, session: str, pane: str) -> dict[str, 
     }
 
 
+def plan(
+    pipeline: Path | None, target: str, own_pane: str
+) -> tuple[str | None, str | None, str | None, str]:
+    """Turn a pipeline target into (pane to type into, text, event `next`, log line).
+
+    Three shapes: `PAUSE`, `@pane:<title|id>: <sentence>` (type the sentence into
+    *that* pane — the conductor), or a prompt file to type into our own pane.
+    """
+    if target.upper() == "PAUSE":
+        return None, None, "PAUSE", "PAUSE (decision needed)"
+    hit = PANE_TARGET.match(target.strip())
+    if hit:
+        spec, text = hit.group("pane").strip(), hit.group("text").strip()
+        dest = resolve_pane(spec)
+        if dest is None:
+            return None, None, None, f"no pane matches {spec!r}; not typing"
+        return dest, text, f"@pane:{spec}", f"next: @pane:{spec} ({dest})"
+    if pipeline is None:
+        return None, None, None, f"no pipeline directory for {target}"
+    prompt = (pipeline.parent / target).expanduser()
+    if not prompt.is_file():
+        return None, None, None, f"prompt not found: {prompt}"
+    if not own_pane:
+        return None, None, None, f"no tmux pane; not typing {target}"
+    return own_pane, prompt.read_text(encoding="utf-8").strip(), target, f"next: {target}"
+
+
 def send_prompt(pane: str, text: str, delay: float = 3.0) -> None:
     """Type the prompt into the pane after the current turn has fully ended."""
     script = (
@@ -229,22 +301,9 @@ def run(argv: list[str] | None = None, stdin: str | None = None) -> int:
     stage, state = event["stage"], event["status"]
 
     target = next_stage(pipeline, stage) if (pipeline and stage) else None
-    prompt: Path | None = None
-    decision = ""
+    dest, text, decision = None, None, ""
     if state == "DONE" and target:
-        if target.upper() == "PAUSE":
-            event["next"] = "PAUSE"
-            decision = "PAUSE (decision needed)"
-        else:
-            candidate = (pipeline.parent / target).expanduser()
-            if not candidate.is_file():
-                decision = f"prompt not found: {candidate}"
-            elif not args.pane:
-                decision = f"no tmux pane; not typing {target}"
-            else:
-                event["next"] = target
-                prompt = candidate
-                decision = f"next: {target}"
+        dest, text, event["next"], decision = plan(pipeline, target, args.pane)
     elif state == "STOPPED":
         decision = "stopped; needs a human or orchestrator"
     elif state == "DONE":
@@ -255,8 +314,8 @@ def run(argv: list[str] | None = None, stdin: str | None = None) -> int:
         _write_log(args, pipeline, stage, state, decision)
 
     # Dispatch first: a sink that is slow or down must never hold up the next stage.
-    if prompt is not None and not args.dry_run:
-        send_prompt(args.pane, prompt.read_text(encoding="utf-8").strip(), args.delay)
+    if dest and text and not args.dry_run:
+        send_prompt(dest, text, args.delay)
 
     _sink(args, event)
     return 0

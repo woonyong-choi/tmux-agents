@@ -1,9 +1,12 @@
 # Changelog
 
-## 0.3.1 — 2026-09-23
+## 0.4.0 — 2026-09-23
 
-The hook grew an exit: what an agent finishes locally can now be seen from outside
-the machine.
+Two halves. The hook grew an exit, so what an agent finishes locally can be seen —
+and acted on — from outside the machine. And the tool set caught up with what an
+agent could already do by typing `tmux` into a shell.
+
+### The hook
 
 - **One hook for Claude Code and Codex.** `tmux-agents hook --agent codex` accepts
   Codex's `notify` shape (an `agent-turn-complete` JSON object passed as an
@@ -23,11 +26,34 @@ the machine.
   — and independent of the pipeline: a stage that is not in the pipeline file, or no
   pipeline file at all, is still reported. One retry, a 3-second timeout, failures on
   stderr only; the next stage goes into the pane even when every sink is down.
+- **A conductor pane.** A pipeline entry written `@pane:<title|id>: <sentence>` types
+  that sentence into *another* pane instead of continuing in this one, so a finished
+  worker wakes the orchestrator directly — Claude Code, Codex or a human, they are all
+  just a pane that takes keystrokes.
 - **`events_read(since_line)`**, a new MCP tool, hands those events to an
   orchestrator that has no shell on the machine, `next_since` at a time.
-- `--pipeline` is now optional (`--notify` or the event log alone is a valid reason
-  to run the hook), and `examples/` has a Claude Code `settings.json` and a Codex
-  `config.toml` side by side.
+- `--pipeline` is now optional, and `examples/` has a Claude Code `settings.json`
+  and a Codex `config.toml` side by side.
+
+### The tools
+
+- **`pane_exec(pane, command, timeout_seconds)`** runs a shell command in a pane and
+  returns only *that command's* output and exit code — no echo of what was typed, no
+  leftovers from the screen. It refuses a pane that is running an agent unless
+  `force=true`.
+- **`pane_wait_any` / `pane_wait_all`** watch a list of panes instead of one: return
+  on the first to settle, or when every one of them has. `pane_send_many` types the
+  same text into several panes at once.
+- **`pane_add`** joins one more agent to a running session (split, title, start,
+  rearrange). **`layout_set`**, **`pane_resize`**, **`pane_zoom`** and **`pane_swap`**
+  cover the rest of the geometry.
+- **`window_list` / `window_new` / `window_kill` / `window_rename`** manage windows,
+  and **`session_attach_cmd`** gives a human the exact command to watch a session.
+- **`pane_clear`** blanks the screen *and* drops the scrollback; **`pane_scroll`**
+  pages back through output that has already left it.
+- **`agents_launch(keep_awake=true)`** holds off idle sleep for as long as the tmux
+  server lives (macOS `caffeinate -i -w <pid>`; elsewhere it is ignored and the reply
+  says so).
 
 ## 0.3.0 — 2026-09-23
 

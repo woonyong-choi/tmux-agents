@@ -1,7 +1,7 @@
 from __future__ import annotations
 
-import base64
 import json
+import os
 import threading
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
@@ -161,65 +161,55 @@ def test_url_failure_is_reported_and_retried(tmp_path, capsys, monkeypatch):
     assert real is not None
 
 
-# --- gist: / repo: (gh is monkeypatched; we check the argv) ---------------------
+# --- gist: / repo: (a real `gh` on PATH, backed by a directory instead of GitHub) --
 
 
 @pytest.fixture
-def fake_gh(monkeypatch):
-    calls: list[tuple[list[str], str | None]] = []
-    replies: dict[str, tuple[int, str, str]] = {}
-
-    def fake(args):
-        # the gist transport hands `gh` a file; read it while it still exists
-        body = None
-        if args[:2] == ["gist", "edit"]:
-            body = Path(args[-1]).read_text(encoding="utf-8")
-        calls.append((args, body))
-        return replies.get(args[0] if args else "", (0, "", ""))
-
-    monkeypatch.setattr(notify, "_gh", fake)
-    return calls, replies
+def gh_store(tmp_path, monkeypatch):
+    """Put tests/fakes/gh on PATH so the transports really shell out to `gh`."""
+    store = tmp_path / "gh-store"
+    monkeypatch.setenv("GH_FAKE_DIR", str(store))
+    fakes = Path(__file__).parent / "fakes"
+    monkeypatch.setenv("PATH", f"{fakes}{os.pathsep}{os.environ['PATH']}")
+    return store
 
 
-def test_gist_spec_reads_then_appends(tmp_path, fake_gh):
-    calls, replies = fake_gh
-    replies["gist"] = (0, "old line\n", "")
-    _run(tmp_path, "WP1 DONE", ["--notify", "gist:abc123:run.log"])
-    assert calls[0][0] == ["gist", "view", "abc123", "--filename", "run.log", "--raw"]
-    assert calls[1][0][:5] == ["gist", "edit", "abc123", "--filename", "run.log"]
-    assert calls[1][0][5].endswith("run.log")  # a source file gh reads, not stdin
-    body = calls[1][1]
-    assert body.startswith("old line\n") and body.endswith("WP1 DONE next=none\n")
+def test_gist_notifications_accumulate(tmp_path, gh_store):
+    for text in ("WP1 DONE", "WP2 STOPPED"):
+        _run(tmp_path, text, ["--notify", "gist:abc123:run.log"])
+    kept = (gh_store / "gists" / "abc123" / "run.log").read_text().splitlines()
+    assert [line.split(" ")[2:4] for line in kept] == [["WP1", "DONE"], ["WP2", "STOPPED"]]
+    assert "gist view abc123 --filename run.log --raw" in (gh_store / "calls.log").read_text()
 
 
-def test_gist_filename_defaults(tmp_path, fake_gh):
-    calls, _ = fake_gh
+def test_gist_filename_defaults_and_the_first_write_creates_the_file(tmp_path, gh_store):
     _run(tmp_path, "WP1 DONE", ["--notify", "gist:abc123"])
-    assert calls[0][0][4] == notify.DEFAULT_FILENAME
+    written = gh_store / "gists" / "abc123" / notify.DEFAULT_FILENAME
+    assert written.read_text().strip().endswith("WP1 DONE next=none")
 
 
-def test_repo_spec_puts_a_commit(tmp_path, fake_gh):
-    calls, replies = fake_gh
-    existing = base64.b64encode(b"first\n").decode()
-    replies["api"] = (0, json.dumps({"sha": "deadbeef", "content": existing}), "")
-    _run(tmp_path, "WP1 DONE", ["--notify", "repo:me/notes:logs/run.log"])
-    assert calls[0][0] == ["api", "/repos/me/notes/contents/logs/run.log"]
-    put = calls[1][0]
-    assert put[:4] == ["api", "-X", "PUT", "/repos/me/notes/contents/logs/run.log"]
-    assert "-f" in put and "sha=deadbeef" in put
-    assert "message=tmux-agents: WP1 DONE" in put
-    sent = next(a for a in put if a.startswith("content="))[len("content=") :]
-    assert base64.b64decode(sent).decode().startswith("first\n")
-    assert base64.b64decode(sent).decode().rstrip().endswith("WP1 DONE next=none")
+def test_repo_notifications_accumulate_one_commit_each(tmp_path, gh_store):
+    for text in ("WP1 DONE", "WP2 DONE"):
+        _run(tmp_path, text, ["--notify", "repo:me/notes:logs/run.log"])
+    kept = (gh_store / "repo" / "logs" / "run.log").read_text().splitlines()
+    assert len(kept) == 2 and kept[0].split(" ")[2:4] == ["WP1", "DONE"]
+    commits = (gh_store / "commits.log").read_text().splitlines()
+    assert commits == ["tmux-agents: WP1 DONE", "tmux-agents: WP2 DONE"]
 
 
-def test_repo_spec_creates_a_missing_file(tmp_path, fake_gh):
-    calls, replies = fake_gh
-    replies["api"] = (1, "", "not found")
+def test_repo_path_defaults(tmp_path, gh_store):
     _run(tmp_path, "WP1 DONE", ["--notify", "repo:me/notes"])
-    put = calls[1][0]
-    assert put[3] == f"/repos/me/notes/contents/{notify.DEFAULT_FILENAME}"
-    assert not any(a.startswith("sha=") for a in put)
+    assert (gh_store / "repo" / notify.DEFAULT_FILENAME).read_text().strip().endswith("next=none")
+
+
+def test_a_missing_gh_is_reported_and_the_hook_still_exits_zero(tmp_path, capsys, monkeypatch):
+    monkeypatch.setattr(notify, "RETRY_PAUSE", 0.0)
+    monkeypatch.setenv("PATH", str(tmp_path / "empty-bin"))  # no gh anywhere
+    out = tmp_path / "local.log"
+    rc = _run(tmp_path, "WP1 DONE", ["--notify", "gist:abc123", "--notify", f"file:{out}"])
+    assert rc == 0
+    assert "gh not found" in capsys.readouterr().err
+    assert out.read_text().strip().endswith("WP1 DONE next=none")  # the other sink still ran
 
 
 def test_bad_spec_shapes_are_rejected():
