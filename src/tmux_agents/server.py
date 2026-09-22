@@ -422,6 +422,11 @@ def pane_exec(pane: str, command: str, timeout_seconds: int = 30, force: bool = 
     unless `force=true` (use `pane_send` to talk to an agent). `timeout_seconds` is
     capped by TMUX_AGENTS_MAX_WAIT; a command that outlives it comes back with
     `state: "timeout"` and no exit code, still running.
+
+    A multi-line command (a heredoc, several lines of shell) or one that ends in `&`
+    cannot be typed as a single line, so it is written to a file and run with `bash`;
+    the reply then carries that file's path in `script`. Write such a command exactly
+    as you would in a script — no `;` gymnastics, no escaping newlines.
     """
     try:
         target = tmux.resolve(pane)

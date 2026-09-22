@@ -115,3 +115,17 @@ def test_layout_choice():
     assert Tmux._pick_layout("auto", 2, narrow) == "even-vertical"
     assert Tmux._pick_layout("auto", 4, wide) == "tiled"
     assert Tmux._pick_layout("main-vertical", 4, wide) == "main-vertical"
+
+
+def test_needs_script_only_for_what_cannot_be_typed_on_one_line():
+    from tmux_agents.tmux import needs_script
+
+    assert not needs_script("git -C ~/repo log --oneline -3")
+    assert not needs_script("echo alpha; echo beta")
+    assert not needs_script("make 2>&1 | tail -5")  # the & of a redirection
+    assert not needs_script("test -f x && echo yes")
+    assert not needs_script("cmd &>log")
+    # a heredoc, a plain second line, and a backgrounded command all break the wrapper
+    assert needs_script("cat <<'EOF' > f\nalpha\nEOF")
+    assert needs_script("echo one\necho two")
+    assert needs_script("echo before; sleep 2 &")

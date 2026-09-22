@@ -61,7 +61,7 @@ Native agents don't have this problem either — they just block on the process.
 
 So the package also ships a **Stop hook** (`tmux-agents hook`). Every agent ends its stage with a
 one-line marker (`WP2 DONE`). When the agent's turn ends, the hook — running locally, for free —
-reads the transcript, finds the marker, looks up the next stage in a plain-text pipeline file and
+reads the message it just printed, finds the marker, looks up the next stage in a pipeline file and
 types the next prompt into the *same* pane. The chain runs itself; the orchestrating model (or a
 human) is needed only at the points you mark `PAUSE`, or when a stage says `STOPPED`.
 
@@ -79,7 +79,7 @@ somewhere an orchestrator that *cannot* see this machine can read it. See
 | `panes_list` | Panes with title, cwd, running command, size |
 | `pane_read` | Last N lines of a pane, ANSI stripped, secrets redacted; `since` reads only what is new |
 | `pane_scroll` | Page back through scrollback: `lines` lines ending `offset` lines above the bottom |
-| `pane_exec` | Run a shell command in a pane and get back only *its* output and exit code |
+| `pane_exec` | Run a shell command in a pane and get back only *its* output and exit code; a multi-line command or a background `&` goes through a script file, whose path comes back as `script` |
 | `pane_wait` | Block until a pane is quiet *and* idle, or a regex appears in new output — returns `idle` / `matched` / `running` / `timeout` plus the tail |
 | `pane_send` | Type text (literally, multi-line safe) and press Enter; optionally wait for a regex in the same call |
 | `pane_send_many` | Type the same text into several panes at once |
@@ -260,6 +260,12 @@ takes either shape and normalizes both, so a pipeline can mix Claude Code and Co
 side: [`examples/claude_settings.json`](examples/claude_settings.json) and
 [`examples/codex_config.toml`](examples/codex_config.toml). Any other agent that runs a command at
 the end of a turn works too; it only needs to hand over `{"transcript_path": ...}` on stdin.
+
+Claude Code's `Stop` payload also carries `last_assistant_message`, and the hook prefers it: at the
+moment the hook starts, the transcript's last line — the turn's final report — may not have reached
+the disk yet. When only a transcript is available the hook reads the turn that just ended (every
+text block after the last prompt or tool result, joined) and, if that turn has not been fully
+written, re-reads it for up to 1.5 seconds before giving up.
 
 ### The conductor pane
 

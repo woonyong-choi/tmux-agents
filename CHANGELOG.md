@@ -2,6 +2,29 @@
 
 ## Unreleased
 
+## 0.4.1 — 2026-09-23
+
+Two things that were quietly wrong in 0.4.0: the hook reported the wrong message, and
+`pane_exec` could not run a script.
+
+- **The hook reported the message before the last one.** `~/.tmux-agents/events.jsonl`
+  recorded `"Now the commit."` for a turn whose pane showed a long final report. Two
+  causes, both fixed. Claude Code's `Stop` payload carries `last_assistant_message`;
+  the hook ignored it and read the transcript instead, and at the moment it starts the
+  transcript's last line is not always on disk yet — the turn's final report was
+  written 60 ms after the timestamp the hook recorded. The payload field now wins.
+  When only a transcript is available, the hook takes the turn that just ended (every
+  assistant text block after the last prompt or tool result, joined) rather than the
+  file's last text block, which lands on the one-liner *before* the last tool call;
+  skips subagent (`isSidechain`) entries; and re-reads for up to 1.5 s while the turn
+  has not been fully written. `message` is still clipped to its last 8 KB.
+- **`pane_exec` now runs multi-line commands.** Typed as one line, a heredoc swallowed
+  the wrapper that marks where the output starts and ends, so the reply came back full
+  of the shell's own echo and the exit code belonged to a fragment; a command ending in
+  `&` did not parse at all (`... &; rc=$?`). Such a command is written to
+  `~/.tmux-agents/exec/exec-<token>.sh` and run as `bash <file>`, and the reply carries
+  that path as `script` (kept for a day, so a failed command can be inspected and rerun
+  by hand). One-line commands are unchanged and `script` is then `null`.
 - `relay/cloudflare/`: reference WebSocket relay for remote conductors (`--notify url:`), with deploy script and README section.
 
 ## 0.4.0 — 2026-09-23

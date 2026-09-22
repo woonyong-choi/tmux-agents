@@ -30,9 +30,10 @@ Codex CLI — `~/.codex/config.toml`:
 
     notify = ["tmux-agents", "hook", "--agent", "codex"]
 
-Claude Code puts `{"transcript_path": ...}` on stdin; Codex passes an
-`agent-turn-complete` JSON object as the last argument (stdin also works). Either
-way only the last assistant message matters.
+Claude Code puts `{"last_assistant_message": ..., "transcript_path": ...}` on
+stdin; Codex passes an `agent-turn-complete` JSON object as the last argument
+(stdin also works). Either way only the last assistant message matters, and both
+agents hand it over directly — the transcript is only read when they do not.
 """
 
 from __future__ import annotations
@@ -43,6 +44,7 @@ import os
 import re
 import subprocess
 import sys
+import time
 from datetime import datetime
 from pathlib import Path
 from typing import Any
@@ -61,28 +63,86 @@ PANE_TARGET = re.compile(r"^@pane:(?P<pane>.+?):\s+(?P<text>.+)$", re.S)
 # A handoff path as agents write it: `~/woon-work/WP-J/handoff.md`, `docs/handoff.md`.
 HANDOFF = re.compile(r"(?:~|\.{0,2}/)?[\w.@+/-]*handoff\.md", re.I)
 
+# The hook can start before the agent has written the turn's last line to the
+# transcript. Re-read for this long, this often, while the turn still looks unfinished.
+FLUSH_WAIT = 1.5
+FLUSH_POLL = 0.15
 
-def last_assistant_text(transcript: Path) -> str:
-    last = ""
+
+def _texts(obj: dict[str, Any]) -> list[str]:
+    """Every non-empty text block of one transcript entry, in order."""
+    content = (obj.get("message") or {}).get("content")
+    if isinstance(content, str):
+        return [content] if content.strip() else []
+    if not isinstance(content, list):
+        return []
+    out = []
+    for part in content:
+        if not isinstance(part, dict) or part.get("type") != "text":
+            continue
+        text = part.get("text")
+        if isinstance(text, str) and text.strip():
+            out.append(text)
+    return out
+
+
+def _has_tool_use(obj: dict[str, Any]) -> bool:
+    content = (obj.get("message") or {}).get("content")
+    if not isinstance(content, list):
+        return False
+    return any(isinstance(p, dict) and p.get("type") == "tool_use" for p in content)
+
+
+def read_turn(transcript: Path) -> tuple[str, bool]:
+    """(what the assistant said in the turn that just ended, whether that turn is over).
+
+    "This turn" is everything said after the last thing the user or a tool said: a
+    final report that follows a tool call is a *separate* entry from the one-liner
+    before that call ("Now the commit."), so taking the file's last text block alone
+    reports the wrong message. All of the turn's text blocks are joined instead.
+
+    The turn is over only once an assistant entry with no tool call in it has been
+    written. Anything else means the agent has not finished flushing, and the caller
+    should look again in a moment. Sidechain entries belong to a subagent, not to
+    this pane's turn, so they are skipped. The fallback, for a transcript that never
+    settles, is the last text block anywhere in it.
+    """
     try:
         lines = transcript.read_text(encoding="utf-8", errors="ignore").splitlines()
     except OSError:
-        return ""
+        return "", False
+    turn: list[str] = []
+    fallback = ""
+    pending = True
     for line in lines:
         try:
             obj = json.loads(line)
         except ValueError:
             continue
-        if obj.get("type") != "assistant":
+        if obj.get("isSidechain"):
             continue
-        content = (obj.get("message") or {}).get("content") or []
-        if isinstance(content, str):
-            last = content
-            continue
-        for part in content:
-            if isinstance(part, dict) and part.get("type") == "text":
-                last = part.get("text", "")
-    return last
+        kind = obj.get("type")
+        if kind == "user":  # a prompt or a tool result: whatever came before is done
+            turn, pending = [], True
+        elif kind == "assistant":
+            found = _texts(obj)
+            if found:
+                turn.extend(found)
+                fallback = found[-1]
+            pending = _has_tool_use(obj)
+    if turn and not pending:
+        return "\n\n".join(turn), True
+    return ("\n\n".join(turn) if turn else fallback), False
+
+
+def last_assistant_text(transcript: Path, wait: float = FLUSH_WAIT) -> str:
+    """The turn's final message, waiting briefly if it is still being written."""
+    deadline = time.monotonic() + max(0.0, wait)
+    while True:
+        text, settled = read_turn(transcript)
+        if settled or time.monotonic() >= deadline:
+            return text
+        time.sleep(FLUSH_POLL)
 
 
 def find_marker(text: str) -> tuple[str, str] | None:
@@ -183,17 +243,30 @@ def read_payload(raw: str | None) -> dict[str, Any]:
     return parsed if isinstance(parsed, dict) else {}
 
 
+def _payload_message(payload: dict[str, Any]) -> str:
+    """The final message the agent handed us, under either spelling of the key."""
+    for key in ("last_assistant_message", "last-assistant-message"):
+        value = payload.get(key)
+        if isinstance(value, str) and value.strip():
+            return value
+    return ""
+
+
 def message_of(agent: str, payload: dict[str, Any]) -> str:
-    """The last assistant message: from the transcript (Claude) or the payload (Codex)."""
+    """The last assistant message: straight from the payload, else from the transcript.
+
+    Claude Code's Stop hook carries `last_assistant_message` (2.1.280 checked) as
+    well as the transcript path. The field wins: it is the message the agent just
+    printed, whereas the transcript's last line may not be on disk yet.
+    """
     if agent == "codex":
         kind = payload.get("type")
         if kind and kind != "agent-turn-complete":
             return ""
-        for key in ("last-assistant-message", "last_assistant_message"):
-            value = payload.get(key)
-            if isinstance(value, str) and value.strip():
-                return value
-        return ""
+        return _payload_message(payload)
+    direct = _payload_message(payload)
+    if direct:
+        return direct
     transcript = Path(str(payload.get("transcript_path") or "")).expanduser()
     return last_assistant_text(transcript) if transcript.is_file() else ""
 

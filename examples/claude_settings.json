@@ -1,8 +1,9 @@
 {
   "//": "~/.claude/settings.json (global) or a repo's .claude/settings.json.",
-  "//1": "Claude Code writes {\"transcript_path\": ...} to the hook's stdin; the hook",
-  "//2": "reads the last assistant message from it. Same events, same pipeline file,",
-  "//3": "same ~/.tmux-agents/events.jsonl as the Codex side (examples/codex_config.toml).",
+  "//1": "Claude Code writes {\"last_assistant_message\": ..., \"transcript_path\": ...}",
+  "//2": "to the hook's stdin; the hook takes the message from the payload, and falls",
+  "//3": "back to the transcript. Same events, same pipeline file, same",
+  "//4": "~/.tmux-agents/events.jsonl as the Codex side (examples/codex_config.toml).",
   "hooks": {
     "Stop": [
       {

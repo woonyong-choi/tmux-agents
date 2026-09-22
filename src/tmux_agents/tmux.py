@@ -4,11 +4,13 @@ from __future__ import annotations
 
 import hashlib
 import re
+import shlex
 import shutil
 import subprocess
 import sys
 import time
 from dataclasses import asdict, dataclass
+from pathlib import Path
 from typing import Any
 from uuid import uuid4
 
@@ -32,6 +34,15 @@ PANE_FORMAT = "\t".join(
     ]
 )
 
+# Where pane_exec parks a command it cannot type as one line, and how long such a
+# script is kept afterwards so the `script` path in the reply stays readable.
+SCRIPT_DIR = "~/.tmux-agents/exec"
+SCRIPT_TTL = 24 * 3600.0
+
+# A `&` that backgrounds a command: not `&&`, and not the `&` of `2>&1` or `&>log`.
+# A quoted `&` matches too; that false positive only costs one unused script file.
+BACKGROUND = re.compile(r"(?<![&>])&(?![&>])")
+
 # Foreground commands that mean "the pane is sitting at a prompt", not working.
 SHELL_COMMANDS = frozenset(
     {"sh", "bash", "zsh", "fish", "dash", "ksh", "mksh", "ash", "csh", "tcsh", "nu", "xonsh"}
@@ -47,6 +58,17 @@ SESSION_FORMAT = "\t".join(
 WINDOW_FORMAT = "\t".join(
     ["#{session_name}", "#{window_index}", "#{window_name}", "#{window_panes}", "#{window_active}"]
 )
+
+
+def needs_script(command: str) -> bool:
+    """Whether `pane_exec` has to put this command in a file rather than type it.
+
+    Two shapes break the one-line `printf <BEG>; <command>; rc=$?` wrapper: a
+    command spanning several lines (the shell echoes each continuation line back
+    into the captured output, and a heredoc swallows the wrapper's tail), and one
+    that backgrounds its last command with `&`, because `& ; rc=$?` will not parse.
+    """
+    return "\n" in command.strip() or bool(BACKGROUND.search(command))
 
 
 class TmuxError(RuntimeError):
@@ -450,6 +472,12 @@ class Tmux:
         The markers only ever appear alone on a line when the shell actually printed
         them — the echoed command line has the quoting around them — so matching a
         whole line is enough to find the boundaries.
+
+        That wrapper is one typed line, which two kinds of command cannot survive: a
+        multi-line one (the shell echoes every continuation line, and with a heredoc
+        the wrapper's own tail lands inside the body) and one ending in `&` (`... &;
+        rc=$?` is a syntax error). Those go to a file run as `bash <file>` instead,
+        and the reply says where the file is under `script`.
         """
         _, _, current = self.probe(pane)
         if not force and self.is_busy(current):
@@ -460,9 +488,11 @@ class Tmux:
         token = uuid4().hex[:10].upper()
         beg, end = f"TAX{token}B", f"TAX{token}E"
         done = re.compile(rf"^{end} (\d+)$", re.M)
+        script = self.write_exec_script(token, command) if needs_script(command) else None
+        payload = f"bash {shlex.quote(str(script))}" if script else command
         since = self.probe(pane)[1]
         wrapped = (
-            f"printf '\\n{beg}\\n'; {command}; __ta_rc=$?; printf '\\n{end} %s\\n' \"$__ta_rc\""
+            f"printf '\\n{beg}\\n'; {payload}; __ta_rc=$?; printf '\\n{end} %s\\n' \"$__ta_rc\""
         )
         self.send(pane, wrapped, enter=True)
         start = time.monotonic()
@@ -477,6 +507,7 @@ class Tmux:
                     "output": self._between(text, beg, end),
                     "elapsed": round(time.monotonic() - start, 1),
                     "since_line": self.probe(pane)[1],
+                    "script": str(script) if script else None,
                 }
             if time.monotonic() - start >= timeout:
                 return {
@@ -485,8 +516,38 @@ class Tmux:
                     "output": self._between(text, beg, end),
                     "elapsed": round(time.monotonic() - start, 1),
                     "since_line": self.probe(pane)[1],
+                    "script": str(script) if script else None,
                     "note": "still running; read the pane or wait again",
                 }
+
+    @staticmethod
+    def write_exec_script(token: str, command: str) -> Path:
+        """Park a command in `SCRIPT_DIR` for the pane's shell to read back.
+
+        Kept after the run — the reply points at it, so a command that failed can be
+        looked at and run again by hand — and swept a day later. A command can carry a
+        secret, so neither the directory nor the file is readable by anyone else.
+        """
+        directory = Path(SCRIPT_DIR).expanduser()
+        try:
+            directory.mkdir(parents=True, exist_ok=True, mode=0o700)
+            Tmux._prune_scripts(directory)
+            path = directory / f"exec-{token}.sh"
+            path.touch(mode=0o600)
+            path.write_text(command.strip() + "\n", encoding="utf-8")
+        except OSError as exc:
+            raise TmuxError(f"cannot write the pane_exec script: {exc}") from exc
+        return path
+
+    @staticmethod
+    def _prune_scripts(directory: Path, ttl: float = SCRIPT_TTL) -> None:
+        cutoff = time.time() - ttl
+        for old in directory.glob("exec-*.sh"):
+            try:
+                if old.stat().st_mtime < cutoff:
+                    old.unlink()
+            except OSError:  # someone else's file, or already gone
+                pass
 
     @staticmethod
     def _between(text: str, beg: str, end: str) -> str:

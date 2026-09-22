@@ -50,3 +50,11 @@ def isolated_event_log(tmp_path_factory, monkeypatch):
     path = tmp_path_factory.mktemp("events") / "events.jsonl"
     monkeypatch.setenv("TMUX_AGENTS_EVENTS", str(path))
     return path
+
+
+@pytest.fixture(autouse=True)
+def isolated_exec_scripts(tmp_path_factory, monkeypatch):
+    """Keep pane_exec's script files out of the real ~/.tmux-agents/exec."""
+    path = tmp_path_factory.mktemp("exec-scripts")
+    monkeypatch.setattr("tmux_agents.tmux.SCRIPT_DIR", str(path))
+    return path

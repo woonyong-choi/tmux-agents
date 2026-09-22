@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import os
 import shutil
+import stat
 import subprocess
 import sys
 import time
@@ -129,6 +130,33 @@ def test_exec_times_out_without_an_exit_code(tmux, workdir):
     assert result["state"] == "timeout" and result["exit_code"] is None
     assert "starting" in result["output"]
     tmux.send_key(tmux.resolve(pane.id), "C-c")
+
+
+def test_exec_runs_a_heredoc_and_a_background_job_through_a_script(tmux, workdir):
+    """Typed as one line this mixed the shell's echo into the output (see CHANGELOG 0.4.1)."""
+    _launch(tmux, workdir, 1)
+    pane = _settle(tmux, "worker 1")
+    target = os.path.join(workdir, "written.txt")
+    command = (
+        f"cat <<'EOF' > {target}\nalpha\nbeta\nEOF\nwc -l < {target}\nsleep 3 &\necho launched"
+    )
+    result = tmux.exec(pane, command, timeout=20)
+    assert result["state"] == "done" and result["exit_code"] == 0
+    assert [ln.strip() for ln in result["output"].splitlines()] == ["2", "launched"]
+    # none of the wrapper, the heredoc body or the shell prompt leaks into the output
+    for leak in ("printf", "__ta_rc", "EOF", "$", "TAX"):
+        assert leak not in result["output"]
+    assert open(target).read() == "alpha\nbeta\n"
+    script = result["script"]
+    assert script and os.path.isfile(script) and "sleep 3 &" in open(script).read()
+    # a command can carry a secret: the script must not be readable by anyone else
+    assert stat.S_IMODE(os.stat(script).st_mode) == 0o600
+
+
+def test_exec_of_a_one_line_command_needs_no_script(tmux, workdir):
+    _launch(tmux, workdir, 1)
+    pane = _settle(tmux, "worker 1")
+    assert tmux.exec(pane, "echo plain", timeout=15)["script"] is None
 
 
 def test_exec_refuses_a_busy_pane_unless_forced(tmux, workdir):
