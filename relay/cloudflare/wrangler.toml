@@ -1,0 +1,12 @@
+name = "agent-relay"
+main = "worker.js"
+compatibility_date = "2026-09-01"
+# routes = [{ pattern = "relay.example.com", custom_domain = true }]  # 자기 도메인을 쓰려면 주석 해제
+
+[[durable_objects.bindings]]
+name = "HUB"
+class_name = "Hub"
+
+[[migrations]]
+tag = "v1"
+new_sqlite_classes = ["Hub"]

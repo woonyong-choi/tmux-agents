@@ -1,5 +1,9 @@
 # Changelog
 
+## Unreleased
+
+- `relay/cloudflare/`: reference WebSocket relay for remote conductors (`--notify url:`), with deploy script and README section.
+
 ## 0.4.0 — 2026-09-23
 
 Two halves. The hook grew an exit, so what an agent finishes locally can be seen —

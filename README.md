@@ -403,3 +403,19 @@ Tests spin up a throwaway tmux server (`tmux -L tmux-agents-test-…`), so they 
 ## License
 
 MIT — see [LICENSE](LICENSE).
+
+## Remote conductors: the relay (optional)
+
+When the orchestrating agent runs on the same machine as the panes it needs nothing: the hook types into the conductor pane and appends to `~/.tmux-agents/events.jsonl`. When the conductor lives somewhere else (a cloud chat, another laptop), give the hook an HTTP sink and let the conductor subscribe over WebSocket:
+
+```
+tmux-agents hook --pipeline pipeline.txt --notify url:https://relay.example.com/event?token=SECRET
+```
+
+`relay/cloudflare/` is a reference relay (one Cloudflare Worker + Durable Object, no storage): `POST /event` fans the JSON body out to every client connected to `wss://…/subscribe`. Deploy it to your own account:
+
+```
+cd relay/cloudflare && bash deploy.sh      # logs in, sets RELAY_TOKEN, deploys, writes ~/.tmux-agents/relay.env
+```
+
+Any subscriber that can open a WebSocket receives every turn-end event the instant the hook fires — no polling. The package itself never depends on a relay; `--notify url:` accepts any endpoint you run. Sandboxed conductors (for example a cloud chat with an egress allowlist) must be allowed to reach the relay host.
