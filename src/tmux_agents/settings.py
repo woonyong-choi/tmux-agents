@@ -37,6 +37,11 @@ class Settings:
                               only sessions whose name starts with this prefix are
                               visible/controllable. Empty = every session.
     TMUX_AGENTS_MAX_LINES     hard cap for pane_read (default 2000)
+    TMUX_AGENTS_MAX_WAIT      hard cap in seconds for pane_wait / pane_send(wait_for)
+                              (default 50). Keep it below the tool timeout of the
+                              client that calls this server (remote bridges: 60s).
+    TMUX_AGENTS_MAX_CHARS     hard cap for the text pane_read returns (default 12000);
+                              longer output is truncated from the front.
     TMUX_AGENTS_ALLOW_KILL    allow session_kill / pane_kill (default true)
     TMUX_AGENTS_OPEN_COMMAND  shell command run after agents_launch to show the
                               session in a terminal app. `{session}` is replaced.
@@ -49,6 +54,8 @@ class Settings:
     socket: str = ""
     session_prefix: str = ""
     max_lines: int = 2000
+    max_wait: int = 50
+    max_chars: int = 12000
     allow_kill: bool = True
     open_command: str = ""
     redact: bool = True
@@ -61,6 +68,8 @@ class Settings:
             socket=os.environ.get("TMUX_AGENTS_SOCKET", ""),
             session_prefix=os.environ.get("TMUX_AGENTS_SESSION_PREFIX", ""),
             max_lines=max(50, _env_int("TMUX_AGENTS_MAX_LINES", 2000)),
+            max_wait=max(5, _env_int("TMUX_AGENTS_MAX_WAIT", 50)),
+            max_chars=max(500, _env_int("TMUX_AGENTS_MAX_CHARS", 12000)),
             allow_kill=_env_bool("TMUX_AGENTS_ALLOW_KILL", True),
             open_command=os.environ.get("TMUX_AGENTS_OPEN_COMMAND", ""),
             redact=_env_bool("TMUX_AGENTS_REDACT", True),
@@ -78,6 +87,8 @@ class Settings:
             "socket": self.socket or "(default)",
             "session_prefix": self.session_prefix or "(any)",
             "max_lines": self.max_lines,
+            "max_wait": self.max_wait,
+            "max_chars": self.max_chars,
             "allow_kill": self.allow_kill,
             "open_command": self.open_command or "(none)",
             "redact": self.redact,

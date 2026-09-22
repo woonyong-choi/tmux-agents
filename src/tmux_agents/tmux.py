@@ -29,6 +29,11 @@ PANE_FORMAT = "\t".join(
     ]
 )
 
+# Foreground commands that mean "the pane is sitting at a prompt", not working.
+SHELL_COMMANDS = frozenset(
+    {"sh", "bash", "zsh", "fish", "dash", "ksh", "mksh", "ash", "csh", "tcsh", "nu", "xonsh"}
+)
+
 SESSION_FORMAT = "\t".join(
     ["#{session_name}", "#{session_windows}", "#{session_attached}", "#{session_created}"]
 )
@@ -84,6 +89,7 @@ class AgentSpec:
 class Tmux:
     def __init__(self, settings: Settings) -> None:
         self.settings = settings
+        self._last_sent: dict[str, str] = {}
 
     # ---------- low level ----------
 
@@ -173,54 +179,151 @@ class Tmux:
 
     # ---------- reading ----------
 
+    def probe(self, pane: Pane) -> tuple[int, int, str]:
+        """(history_size, line_cursor, foreground command) in one tmux round trip.
+
+        `history_size` is how many lines have scrolled off the top; it is also the
+        absolute index of the first visible line. `line_cursor` is the absolute
+        index of the line the cursor sits on, so it only ever grows (until
+        `clear_history`) and can be handed back as `since`.
+        """
+        out = self.run(
+            "display-message",
+            "-p",
+            "-t",
+            pane.id,
+            "#{history_size}\t#{cursor_y}\t#{pane_current_command}",
+        ).strip("\n")
+        fields = out.split("\t")
+        if len(fields) < 3:
+            raise TmuxError(f"unexpected display-message output: {out!r}")
+        history, cursor_y, command = int(fields[0]), int(fields[1]), fields[2]
+        return history, history + cursor_y, command
+
+    @staticmethod
+    def is_busy(command: str) -> bool:
+        """True when the pane's foreground process is not just a shell prompt."""
+        return command.lstrip("-").lower() not in SHELL_COMMANDS
+
     def capture(self, pane: Pane, lines: int | None = None, *, clean: bool = True) -> str:
         n = min(lines or self.settings.max_lines, self.settings.max_lines)
         raw = self.run("capture-pane", "-p", "-J", "-t", pane.id, "-S", f"-{n}")
+        return self._clean(raw, clean=clean)
+
+    def capture_since(self, pane: Pane, since: int, *, clean: bool = True) -> str:
+        """Capture every line from absolute offset `since` to the bottom of the pane."""
+        history = self.probe(pane)[0]
+        start = max(since - history, -min(history, self.settings.max_lines))
+        raw = self.run("capture-pane", "-p", "-J", "-t", pane.id, "-S", str(start), "-E", "-")
+        return self._clean(raw, clean=clean)
+
+    def _clean(self, raw: str, *, clean: bool) -> str:
         text = strip_ansi(raw) if clean else raw
         text = "\n".join(line.rstrip() for line in text.splitlines()).rstrip("\n")
         if self.settings.redact:
             text = redact(text)
         return text
 
+    def clear_history(self, pane: Pane) -> None:
+        """Drop the scrollback. `since` offsets taken before this call become stale."""
+        self.run("clear-history", "-t", pane.id)
+
     def fingerprint(self, pane: Pane) -> str:
-        raw = self.run("capture-pane", "-p", "-t", pane.id, "-S", "-200")
+        """Hash of the visible screen: what 'the pane is not changing' means."""
+        raw = self.run("capture-pane", "-p", "-t", pane.id)
         return hashlib.sha1(raw.encode("utf-8", "replace")).hexdigest()
+
+    @staticmethod
+    def strip_echo(text: str, echo: str | None) -> str:
+        """Drop everything up to and including the shell's echo of `echo`.
+
+        A pattern must not match the command that was just typed. Position alone
+        cannot tell the echo apart from the output (both land on the same screen,
+        and a long command wraps), so we key on the text we ourselves sent: the
+        last line of it, found once, with the rest of that display line removed.
+        `capture-pane -J` has already rejoined wrapped lines.
+        """
+        if not echo:
+            return text
+        marker = next((ln for ln in reversed(echo.strip().splitlines()) if ln.strip()), "")
+        if not marker.strip():
+            return text
+        at = text.find(marker.strip())
+        if at < 0:
+            return text
+        nl = text.find("\n", at + len(marker.strip()))
+        return "" if nl < 0 else text[nl + 1 :]
 
     def wait(
         self,
         pane: Pane,
         *,
-        timeout: float = 120.0,
+        timeout: float = 50.0,
         idle: float = 4.0,
         pattern: str | None = None,
         poll: float = 0.5,
+        since: int | None = None,
+        include_existing: bool = False,
+        echo: str | None = None,
     ) -> dict[str, Any]:
-        """Block until the pane is quiet for `idle` seconds or `pattern` appears."""
+        """Block until the pane goes idle, `pattern` appears, or `timeout` runs out.
+
+        Idle means two things at once: the screen stopped changing *and* no
+        foreground command is running. A silent build is therefore not idle, and a
+        spinner that never settles reports `running` instead of `timeout`.
+
+        `pattern` is searched only in what arrived after `since` (default: the
+        history size when the wait began), minus the echo of the last text this
+        server sent to the pane. `include_existing=True` restores the old
+        behaviour of searching the whole visible scrollback.
+        """
         import re
 
         regex = re.compile(pattern, re.MULTILINE) if pattern else None
         start = time.monotonic()
+        history, cursor, command = self.probe(pane)
+        if since is None:
+            since = history
+        if echo is None and not include_existing:
+            echo = self._last_sent.get(pane.id)
         last_fp = self.fingerprint(pane)
         last_change = start
+
+        def result(state: str) -> dict[str, Any]:
+            history, cursor, command = self.probe(pane)
+            return {
+                "state": state,
+                "elapsed": round(time.monotonic() - start, 1),
+                "busy": self.is_busy(command),
+                "current_command": command,
+                "since_line": cursor,
+            }
+
         while True:
             time.sleep(poll)
             now = time.monotonic()
+            _, cursor, command = self.probe(pane)
+            busy = self.is_busy(command)
             if regex is not None:
-                text = self.capture(pane, 200)
+                if include_existing:
+                    text = self.capture(pane, 200)
+                else:
+                    text = self.strip_echo(self.capture_since(pane, since), echo)
                 if regex.search(text):
-                    return {"state": "matched", "elapsed": round(now - start, 1)}
+                    return result("matched")
             fp = self.fingerprint(pane)
             if fp != last_fp:
                 last_fp, last_change = fp, now
-            elif now - last_change >= idle:
-                return {"state": "idle", "elapsed": round(now - start, 1)}
+            elif not busy and now - last_change >= idle:
+                return result("idle")
             if now - start >= timeout:
-                return {"state": "timeout", "elapsed": round(now - start, 1)}
+                return result("running" if busy else "timeout")
 
     # ---------- writing ----------
 
     def send(self, pane: Pane, text: str, *, enter: bool = True, literal: bool = True) -> None:
         if text:
+            self._last_sent[pane.id] = text
             args = ["send-keys", "-t", pane.id]
             if literal:
                 args.append("-l")

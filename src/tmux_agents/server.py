@@ -21,7 +21,9 @@ that run inside tmux panes on this machine.
 Typical loop:
   1. `agents_launch` — one session, one pane per agent, titles on the borders.
   2. `pane_wait`     — block until a pane goes quiet (agent finished or is asking).
-  3. `pane_read`     — read what it printed.
+                       It always returns within TMUX_AGENTS_MAX_WAIT seconds; the
+                       state `running` means "still working, call me again".
+  3. `pane_read`     — read what it printed (`since` reads only what is new).
   4. `pane_send`     — answer its question or give the next instruction.
   5. `session_kill`  — tear the session down when the batch is done.
 
@@ -40,6 +42,19 @@ def _json(payload: Any) -> str:
 
 def _error(exc: Exception) -> str:
     return _json({"ok": False, "error": str(exc)})
+
+
+_CAP_HINT = (
+    "waiting was cut short to stay under the client's tool timeout; "
+    "call pane_wait again to keep waiting"
+)
+
+
+def _capped(timeout_seconds: int) -> tuple[float, bool]:
+    """Clamp a requested wait to TMUX_AGENTS_MAX_WAIT, and say whether we had to."""
+    requested = max(1, int(timeout_seconds))
+    limit = settings.max_wait
+    return float(min(requested, limit)), requested > limit
 
 
 @mcp.tool()
@@ -69,32 +84,118 @@ def panes_list(session: str | None = None) -> str:
 
 
 @mcp.tool()
-def pane_read(pane: str, lines: int = 200, raw: bool = False) -> str:
-    """Read the last `lines` lines of a pane (scrollback included).
+def pane_read(
+    pane: str,
+    lines: int = 200,
+    raw: bool = False,
+    since: int | None = None,
+) -> str:
+    """Read a pane. By default the last `lines` lines; with `since`, only what is new.
 
     `pane` is a pane id (%3), a target (session:0.1) or a pane title (partial,
     case-insensitive). `raw=true` keeps ANSI escape codes.
+
+    Pass the `next_since` (or `since_line`) of an earlier call as `since` to read
+    only what the pane printed after it — that is how you follow a long build
+    without re-reading its scrollback every time. The reply always carries
+    `next_since` for the following call. Output longer than TMUX_AGENTS_MAX_CHARS
+    is cut at the front and flagged with `truncated: true`.
     """
     try:
         p = tmux.resolve(pane)
+        if since is None:
+            text = tmux.capture(p, lines, clean=not raw)
+        else:
+            text = tmux.capture_since(p, since, clean=not raw)
+        next_since = tmux.probe(p)[1]
+        limit = settings.max_chars
+        truncated = len(text) > limit
+        if truncated:
+            text = text[-limit:]
         return _json(
-            {"ok": True, "pane": p.as_dict(), "text": tmux.capture(p, lines, clean=not raw)}
+            {
+                "ok": True,
+                "pane": p.as_dict(),
+                "text": text,
+                "next_since": next_since,
+                "truncated": truncated,
+            }
         )
     except TmuxError as exc:
         return _error(exc)
 
 
 @mcp.tool()
-def pane_send(pane: str, text: str, enter: bool = True) -> str:
+def pane_send(
+    pane: str,
+    text: str,
+    enter: bool = True,
+    wait_for: str | None = None,
+    force: bool = False,
+    clear_history: bool = False,
+    timeout_seconds: int = 0,
+) -> str:
     """Type `text` into a pane, then press Enter (unless enter=false).
 
     Text is sent literally (no tmux key-name expansion), so multi-line prompts
     and special characters are safe. Use `pane_key` for control keys.
+
+    A pane whose foreground process is not a shell is busy: what you type would
+    land in whatever is running, so the send is refused unless `force=true`.
+    That check is what you want when the pane holds a build; pass `force=true`
+    to answer an agent's question (Claude Code, Codex and friends look busy the
+    whole time they are open).
+
+    `wait_for` is a regex: after sending, wait for it in the output the command
+    produces — the echo of `text` itself never matches — and return the result in
+    this one call, up to TMUX_AGENTS_MAX_WAIT seconds. `clear_history=true` drops
+    the scrollback first, which keeps later reads small but invalidates `since`
+    offsets taken before this call.
     """
     try:
         p = tmux.resolve(pane)
+        current_command = tmux.probe(p)[2]
+        if tmux.is_busy(current_command) and not force:
+            return _json(
+                {
+                    "ok": False,
+                    "pane": p.id,
+                    "busy": True,
+                    "current_command": current_command,
+                    "error": (
+                        f"pane is running {current_command!r}, not a shell; "
+                        "pass force=true to type into it anyway"
+                    ),
+                }
+            )
+        if clear_history:
+            tmux.clear_history(p)
+        payload: dict[str, Any] = {
+            "ok": True,
+            "pane": p.id,
+            "sent_chars": len(text),
+            "enter": enter,
+            "cleared_history": clear_history,
+        }
+        since = tmux.probe(p)[0]
         tmux.send(p, text, enter=enter)
-        return _json({"ok": True, "pane": p.id, "sent_chars": len(text), "enter": enter})
+        if wait_for:
+            timeout, capped = _capped(timeout_seconds or settings.max_wait)
+            result = tmux.wait(
+                p,
+                timeout=timeout,
+                idle=min(4.0, timeout),
+                pattern=wait_for,
+                since=since,
+                echo=text,
+            )
+            payload.update(result)
+            payload["ok"] = True
+            payload["tail"] = tmux.capture(p, 40)
+            if capped:
+                payload["capped"] = True
+                payload["hint"] = _CAP_HINT
+        return _json(payload)
     except TmuxError as exc:
         return _error(exc)
 
@@ -113,23 +214,44 @@ def pane_key(pane: str, key: str = "C-c") -> str:
 @mcp.tool()
 def pane_wait(
     pane: str,
-    timeout_seconds: int = 120,
+    timeout_seconds: int = 50,
     idle_seconds: int = 4,
     pattern: str | None = None,
     tail_lines: int = 40,
+    include_existing: bool = False,
 ) -> str:
-    """Wait until a pane stops changing for `idle_seconds`, or `pattern` (regex) appears.
+    """Wait until a pane goes idle, or `pattern` (regex) appears in its new output.
 
-    Returns state (idle | matched | timeout) plus the last `tail_lines` lines so
-    you can decide whether the agent finished, is asking a question, or errored.
-    Keep timeout_seconds under your client's tool timeout; call again to keep waiting.
+    States:
+      idle     the screen stopped changing for `idle_seconds` *and* no command is
+               running. A silent 50-second build no longer counts as idle.
+      matched  `pattern` showed up in what arrived after this wait began. The echo
+               of the command that was typed never matches; pass
+               `include_existing=true` to search the whole visible screen instead.
+      running  `timeout_seconds` ran out while a command was still going (an agent
+               thinking, a spinner that never settles). Call again to keep waiting.
+      timeout  time ran out at a shell prompt whose screen kept changing.
+
+    `timeout_seconds` is capped at TMUX_AGENTS_MAX_WAIT (default 50) so the call
+    returns before a remote client's 60-second tool timeout; when it is capped the
+    reply says `capped: true`. The reply also carries `busy`, `current_command`,
+    the last `tail_lines` lines, and `since_line` to hand to pane_read(since=...).
     """
     try:
         p = tmux.resolve(pane)
+        timeout, capped = _capped(timeout_seconds)
+        idle = min(float(idle_seconds), timeout)
         result = tmux.wait(
-            p, timeout=float(timeout_seconds), idle=float(idle_seconds), pattern=pattern
+            p,
+            timeout=timeout,
+            idle=idle,
+            pattern=pattern,
+            include_existing=include_existing,
         )
         result.update({"ok": True, "pane": p.id, "tail": tmux.capture(p, tail_lines)})
+        if capped:
+            result["capped"] = True
+            result["hint"] = _CAP_HINT
         return _json(result)
     except TmuxError as exc:
         return _error(exc)

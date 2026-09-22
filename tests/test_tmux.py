@@ -73,13 +73,14 @@ def test_send_key_interrupts(tmux, workdir):
     assert tmux.resolve("worker 1").command != "sleep"
 
 
-def test_wait_times_out_on_busy_pane(tmux, workdir):
+def test_wait_reports_running_on_a_busy_pane(tmux, workdir):
     _launch(tmux, workdir, 1)
     p = tmux.resolve("worker 1")
     tmux.wait(p, timeout=10, idle=1)
     tmux.send(p, "i=0; while true; do i=$((i+1)); echo tick-$i; sleep 0.2; done")
     state = tmux.wait(p, timeout=3, idle=2)
-    assert state["state"] == "timeout"
+    assert state["state"] == "running"
+    assert state["busy"] is True
     tmux.send_key(p, "C-c")
 
 

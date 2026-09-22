@@ -1,5 +1,39 @@
 # Changelog
 
+## 0.3.0 — 2026-09-23
+
+Everything here comes from running the server behind a remote bridge, where a tool
+call is cut off after 60 seconds. Four things broke; all four are fixed.
+
+- **`pane_wait` always returns.** `timeout_seconds` is capped at
+  `TMUX_AGENTS_MAX_WAIT` (new, default 50) and the default dropped from 120 to 50,
+  so the call cannot outlive a client's tool timeout. A capped call answers with
+  `capped: true` and says to call again.
+- **Idle means idle.** A pane counts as idle only when the screen stopped changing
+  *and* no foreground command is running (`pane_current_command` is a shell). A
+  silent 50-second build is no longer reported as finished. A pane that never
+  settles — an agent's spinner — now ends a wait with `state: "running"` instead of
+  `timeout`, so the caller knows to keep waiting rather than to give up. Replies
+  carry `busy`, `current_command` and `since_line`.
+- **A pattern no longer matches the command you typed.** `pane_wait` searches only
+  output that arrived after the wait began, minus the shell's echo of the last text
+  this server sent to that pane — so `pane_send("echo DONE")` +
+  `pane_wait(pattern="DONE")` waits for the command instead of matching its echo,
+  and callers no longer need `^` anchors that break on wrapped commands.
+  `include_existing=true` restores the old whole-screen search.
+- **Reads stay small.** `pane_read(since=...)` returns only what a pane printed
+  after a given offset and hands back `next_since` for the following call. Output
+  longer than `TMUX_AGENTS_MAX_CHARS` (new, default 12000) is cut at the front and
+  flagged `truncated: true`. `pane_send(clear_history=true)` runs
+  `tmux clear-history`, which `clear` alone never did.
+- **`pane_send` refuses a busy pane** unless `force=true`, so a command meant for a
+  shell cannot land inside a running build. `pane_send(wait_for=...)` sends and
+  waits for a regex in one call.
+
+Existing calls keep working: every new argument is optional and no tool was
+removed or renamed. Only defaults changed (`pane_wait(timeout_seconds=120 → 50)`),
+and a busy pane that used to answer `timeout` now answers `running`.
+
 ## 0.2.1 — 2026-09-22
 
 - hook: also accept a marker quoted inside a sentence within the last 6 lines (agents often write "the last line is WP2 DONE" rather than the bare line).

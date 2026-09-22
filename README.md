@@ -73,9 +73,9 @@ human) is needed only at the points you mark `PAUSE`, or when a stage says `STOP
 | `tmux_status` | Server config, tmux version, visible sessions |
 | `agents_launch` | Create a session with one pane per agent, title each pane, run each command, pick a layout that fits (side-by-side for 2, tiled for 3+), optionally open it in your terminal app |
 | `panes_list` | Panes with title, cwd, running command, size |
-| `pane_read` | Last N lines of a pane, ANSI stripped, secrets redacted |
-| `pane_wait` | Block until a pane is quiet for N seconds or a regex appears — returns `idle` / `matched` / `timeout` plus the tail |
-| `pane_send` | Type text (literally, multi-line safe) and press Enter |
+| `pane_read` | Last N lines of a pane, ANSI stripped, secrets redacted; `since` reads only what is new |
+| `pane_wait` | Block until a pane is quiet *and* idle, or a regex appears in new output — returns `idle` / `matched` / `running` / `timeout` plus the tail |
+| `pane_send` | Type text (literally, multi-line safe) and press Enter; optionally wait for a regex in the same call |
 | `pane_key` | Send `C-c`, `Escape`, `Up`, `Tab` … |
 | `pane_kill` / `session_kill` | Stop one agent or the whole batch (can be disabled) |
 
@@ -137,18 +137,47 @@ agents_launch({
 })
 // → 3 tiled panes, Ghostty window opens
 
-pane_wait({"pane": "WP6b", "timeout_seconds": 300, "idle_seconds": 8})
-// → {"state": "idle", "tail": "... Overwrite tsconfig.json? (y/N)"}
+pane_wait({"pane": "WP6b", "idle_seconds": 8})
+// → {"state": "running", "busy": true, "current_command": "codex",
+//    "capped": true, "since_line": 1840}   // still thinking: call again
+pane_wait({"pane": "WP6b", "idle_seconds": 8})
+// → {"state": "idle", "busy": false, "since_line": 1907,
+//    "tail": "... Overwrite tsconfig.json? (y/N)"}
 
-pane_send({"pane": "WP6b", "text": "y"})
+pane_send({"pane": "WP6b", "text": "y", "force": true})   // a pane holding an agent is "busy"
 
 pane_wait({"pane": "WP5", "pattern": "handoff\\.md written"})
-pane_read({"pane": "WP5", "lines": 80})
+pane_read({"pane": "WP5", "since": 1907})   // only what WP5 printed since
+// → {"text": "...", "next_since": 2233, "truncated": false}
 
 session_kill({"session": "agents-wp5"})
 ```
 
-`pane_wait` is the heart of it. "Quiet for 8 seconds" is a surprisingly reliable definition of *an agent is either done or waiting for you*, and the tail tells the model which.
+`pane_wait` is the heart of it, and it asks two questions, not one: has the screen
+stopped changing, *and* is the pane back at a shell prompt? Either alone lies. A
+`npm run build` that prints nothing for a minute has a perfectly still screen; a
+Claude Code pane with a spinner never stops changing. Screen-still **and**
+prompt-back is a reliable definition of *this agent is either done or waiting for
+you*, and the tail tells the model which.
+
+Two consequences worth knowing:
+
+- **Every wait returns.** `timeout_seconds` is capped at `TMUX_AGENTS_MAX_WAIT`
+  (50s) so the call finishes inside the 60-second tool timeout that remote
+  bridges impose. `state: "running"` with `capped: true` means "still working,
+  ask again" — it is a checkpoint, not a failure.
+- **A pattern never matches the command you just typed.** `pane_wait` searches
+  only output that arrived after the wait began, minus the shell's echo of the
+  last text this server sent. Without that, `pane_send("echo DONE")` followed by
+  `pane_wait(pattern="DONE")` matches the echo instantly, before the command has
+  run. Pass `include_existing: true` for the old, whole-screen search.
+
+For a short command the two steps collapse into one call:
+
+```jsonc
+pane_send({"pane": "WP5", "text": "pytest -q", "wait_for": "passed|failed"})
+// → {"state": "matched", "elapsed": 12.4, "tail": "36 passed in 80.31s"}
+```
 
 ## Chaining stages with the Stop hook
 
@@ -216,7 +245,9 @@ All via environment variables (set them in the `env` block of your MCP config):
 | `TMUX_AGENTS_OPEN_COMMAND` | *(none)* | Command run after `agents_launch`; `{session}` is substituted |
 | `TMUX_AGENTS_ALLOW_KILL` | `true` | Set `false` to disable `pane_kill` / `session_kill` |
 | `TMUX_AGENTS_REDACT` | `true` | Replace token-looking strings in pane text with `[redacted]` |
-| `TMUX_AGENTS_MAX_LINES` | `2000` | Hard cap for `pane_read` |
+| `TMUX_AGENTS_MAX_LINES` | `2000` | Hard cap on the lines `pane_read` captures |
+| `TMUX_AGENTS_MAX_CHARS` | `12000` | Hard cap on the characters `pane_read` returns; longer output is cut at the front and flagged `truncated` |
+| `TMUX_AGENTS_MAX_WAIT` | `50` | Hard cap in seconds on `pane_wait`. Keep it below your client's tool timeout — remote bridges cut calls off at 60s |
 | `TMUX_AGENTS_SOCKET` | *(default server)* | `tmux -L <socket>` — isolate the agents on their own tmux server |
 | `TMUX_AGENTS_TMUX` | `tmux` | Path to the tmux binary |
 
