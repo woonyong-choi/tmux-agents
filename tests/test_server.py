@@ -69,3 +69,31 @@ def test_output_is_redacted(server_env, workdir):
     s.pane_wait("leak", timeout_seconds=10, idle_seconds=1)
     text = json.loads(s.pane_read("leak"))["text"]
     assert "[redacted]" in text and "ghp_ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789" not in text
+
+
+def test_events_read_follows_the_hook_log(server_env, isolated_event_log, tmp_path):
+    import json as _json
+
+    from tmux_agents import hook
+
+    s = _load(server_env)
+    for text in ("WP1 DONE", "WP1 STOPPED"):
+        hook.run(
+            ["--dry-run"],
+            stdin=_json.dumps({"transcript_path": str(_write_transcript(tmp_path, text))}),
+        )
+    first = json.loads(s.events_read())
+    assert first["ok"] and first["count"] == 2 and first["next_since"] == 2
+    assert [e["status"] for e in first["events"]] == ["DONE", "STOPPED"]
+    assert first["path"] == str(isolated_event_log)
+
+    empty = json.loads(s.events_read(since_line=first["next_since"]))
+    assert empty["count"] == 0 and empty["next_since"] == 2
+
+
+def _write_transcript(tmp_path, text):
+    path = tmp_path / f"t-{abs(hash(text))}.jsonl"
+    path.write_text(
+        json.dumps({"type": "assistant", "message": {"content": [{"type": "text", "text": text}]}})
+    )
+    return path

@@ -1,0 +1,16 @@
+# ~/.codex/config.toml — Codex CLI calls this program when a turn ends.
+# It appends the argument list with one JSON object:
+#   {"type":"agent-turn-complete","turn-id":"...","input-messages":[...],
+#    "last-assistant-message":"..."}
+# `tmux-agents hook --agent codex` reads `last-assistant-message`, writes the
+# normalized event to ~/.tmux-agents/events.jsonl, and — with --pipeline — types
+# the next stage's prompt into the same pane.
+
+notify = ["tmux-agents", "hook", "--agent", "codex"]
+
+# Chain stages and push every event to a gist an orchestrator elsewhere can poll:
+# notify = [
+#   "tmux-agents", "hook", "--agent", "codex",
+#   "--pipeline", "/abs/path/to/pipeline/manta.txt",
+#   "--notify", "gist:8f3c1e0b2d4a6c9e1f0a3b5c7d9e1f02:run.log",
+# ]

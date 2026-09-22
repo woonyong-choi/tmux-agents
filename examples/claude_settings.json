@@ -1,0 +1,19 @@
+{
+  "//": "~/.claude/settings.json (global) or a repo's .claude/settings.json.",
+  "//1": "Claude Code writes {\"transcript_path\": ...} to the hook's stdin; the hook",
+  "//2": "reads the last assistant message from it. Same events, same pipeline file,",
+  "//3": "same ~/.tmux-agents/events.jsonl as the Codex side (examples/codex_config.toml).",
+  "hooks": {
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "tmux-agents hook --pipeline /abs/path/to/pipeline/manta.txt --notify gist:8f3c1e0b2d4a6c9e1f0a3b5c7d9e1f02:run.log",
+            "timeout": 15
+          }
+        ]
+      }
+    ]
+  }
+}

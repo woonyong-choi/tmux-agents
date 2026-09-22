@@ -63,7 +63,11 @@ So the package also ships a **Stop hook** (`tmux-agents hook`). Every agent ends
 one-line marker (`WP2 DONE`). When the agent's turn ends, the hook — running locally, for free —
 reads the transcript, finds the marker, looks up the next stage in a plain-text pipeline file and
 types the next prompt into the *same* pane. The chain runs itself; the orchestrating model (or a
-human) is needed only at the points you mark `PAUSE`, or when a stage says `STOPPED`. See
+human) is needed only at the points you mark `PAUSE`, or when a stage says `STOPPED`.
+
+The same hook is also the event source: every finished turn — Claude Code's `Stop`, Codex's
+`notify` — becomes one JSON line in `~/.tmux-agents/events.jsonl`, and `--notify` pushes that line
+somewhere an orchestrator that *cannot* see this machine can read it. See
 [Chaining stages with the Stop hook](#chaining-stages-with-the-stop-hook).
 
 ## Tools
@@ -78,6 +82,7 @@ human) is needed only at the points you mark `PAUSE`, or when a stage says `STOP
 | `pane_send` | Type text (literally, multi-line safe) and press Enter; optionally wait for a regex in the same call |
 | `pane_key` | Send `C-c`, `Escape`, `Up`, `Tab` … |
 | `pane_kill` / `session_kill` | Stop one agent or the whole batch (can be disabled) |
+| `events_read` | Read turn-end events written by the hook (`since_line` reads only what is new) — wait on finished turns instead of polling panes |
 
 Plus one CLI subcommand, `tmux-agents hook`, for chaining stages without polling (below).
 
@@ -229,11 +234,97 @@ decision is appended to `pipeline/manta.log`:
 ```
 
 What halts the chain, on purpose: a `STOPPED` marker, a `PAUSE` entry, a stage that is not in the
-file, a missing prompt file, or running outside tmux (no `$TMUX_PANE`). Options: `--log`,
-`--pane`, `--delay`, and `--dry-run` (log the decision, type nothing).
+file, a missing prompt file, or running outside tmux (no `$TMUX_PANE`). None of that stops the
+event from being recorded. Options: `--agent`, `--notify`, `--events`, `--no-events`, `--log`,
+`--pane`, `--delay`, and `--dry-run` (decide and record, type nothing).
 
-Codex and other agents that expose a "turn finished" hook with the transcript path in stdin work
-the same way; the hook only needs `{"transcript_path": ...}` on stdin.
+**Codex CLI** reaches the same hook through its own `notify` setting, in `~/.codex/config.toml`:
+
+```toml
+notify = ["tmux-agents", "hook", "--agent", "codex"]
+```
+
+Codex appends one `agent-turn-complete` JSON object to that argument list instead of writing to
+stdin, and the last assistant message is in the payload rather than in a transcript file. The hook
+takes either shape and normalizes both, so a pipeline can mix Claude Code and Codex panes. Side by
+side: [`examples/claude_settings.json`](examples/claude_settings.json) and
+[`examples/codex_config.toml`](examples/codex_config.toml). Any other agent that runs a command at
+the end of a turn works too; it only needs to hand over `{"transcript_path": ...}` on stdin.
+
+### The event log
+
+Whatever the agent, every finished turn becomes one line in `~/.tmux-agents/events.jsonl`
+(`--events <path>` or `TMUX_AGENTS_EVENTS` to move it, `--no-events` to turn it off):
+
+```json
+{"ts":"2026-09-23T04:11:07Z","agent":"claude","session":"manta","pane":"WP2 Run","stage":"WP2","status":"DONE","message":"...the whole last assistant message...","handoff":"~/woon-work/WP-J/handoff.md","next":"prompts/wp3.md"}
+```
+
+| Field | |
+|---|---|
+| `ts` | when the turn ended, ISO 8601 UTC |
+| `agent` | `claude` or `codex` |
+| `session` / `pane` | tmux session name and pane title (`-` outside tmux) |
+| `stage` / `status` | the marker: `WP2` + `DONE`/`STOPPED`, or `null` + `TURN` when the turn carried no marker |
+| `message` | the last assistant message in full, clipped to the last 8 KB |
+| `handoff` | the last `handoff.md` path mentioned in it, or `null` |
+| `next` | the prompt the hook typed, `PAUSE`, or `null` |
+
+### Getting the events out (`--notify`)
+
+An orchestrator running *on this machine* just follows the file. One running somewhere else — a
+cloud session, another model — cannot see it, so `--notify <spec>` pushes each event out. Repeat
+the flag for more than one sink:
+
+| Spec | What it does |
+|---|---|
+| `file:/abs/path.log` | append the line locally |
+| `gist:<gist_id>[:<filename>]` | append to a gist file via `gh gist edit` (filename defaults to `tmux-agents.log`) |
+| `repo:<owner/name>[:<path>]` | append to a file in a repo via `gh api`, one commit per event |
+| `url:https://...` | POST the whole event as JSON |
+
+The pushed line is fixed, and independent of the pipeline — a stage that is not in the pipeline
+file, or no pipeline file at all, still gets reported:
+
+```
+2026-09-23T04:11:07Z manta/WP2_Run WP2 DONE next=prompts/wp3.md
+2026-09-23T05:22:41Z manta/WP3_Docs WP3 STOPPED next=none
+```
+
+`<ISO8601Z> <session>/<pane_title> <STAGE> <DONE|STOPPED|TURN> next=<prompt>|PAUSE|none`.
+Whitespace inside a session name or pane title becomes `_` so `awk`/`cut` still work; an unknown
+field is `-`. `gist:` and `repo:` need `gh` on `PATH` and authenticated.
+
+Delivery is best effort and deliberately out of the way: one retry, a 3-second timeout, failures
+on stderr only. The hook exits 0 and the next stage goes into the pane even when every sink is
+down.
+
+### How an orchestrator picks them up
+
+**On this machine** — follow the file, or call `events_read(since_line=...)` and keep the
+`next_since` it returns:
+
+```bash
+tail -f ~/.tmux-agents/events.jsonl | jq -r '"\(.pane) \(.stage // "-") \(.status)"'
+```
+
+**From somewhere else** — have the hook write to a gist (or a repo file) and poll its raw URL,
+printing only what is new:
+
+```bash
+# tmux-agents hook ... --notify gist:<gist_id>:run.log
+RAW="https://gist.githubusercontent.com/<user>/<gist_id>/raw/run.log"
+seen=0
+while :; do
+  curl -fsSL "$RAW" > /tmp/run.log || { sleep 30; continue; }
+  now=$(wc -l < /tmp/run.log)
+  [ "$now" -gt "$seen" ] && sed -n "$((seen + 1)),\$p" /tmp/run.log && seen=$now
+  sleep 30
+done
+```
+
+A raw gist URL is cached for a minute or so, so expect the first line to show up a poll or two
+late; `repo:<owner/name>` through `gh api` is immediate but costs a commit per event.
 
 ## Configuration
 
@@ -250,6 +341,7 @@ All via environment variables (set them in the `env` block of your MCP config):
 | `TMUX_AGENTS_MAX_WAIT` | `50` | Hard cap in seconds on `pane_wait`. Keep it below your client's tool timeout — remote bridges cut calls off at 60s |
 | `TMUX_AGENTS_SOCKET` | *(default server)* | `tmux -L <socket>` — isolate the agents on their own tmux server |
 | `TMUX_AGENTS_TMUX` | `tmux` | Path to the tmux binary |
+| `TMUX_AGENTS_EVENTS` | `~/.tmux-agents/events.jsonl` | Where the hook appends turn-end events and `events_read` reads them |
 
 ## Security model, plainly
 

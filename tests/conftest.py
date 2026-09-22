@@ -42,3 +42,11 @@ def server_env(monkeypatch):
 def workdir(tmp_path):
     os.makedirs(tmp_path, exist_ok=True)
     return str(tmp_path)
+
+
+@pytest.fixture(autouse=True)
+def isolated_event_log(tmp_path_factory, monkeypatch):
+    """Never let a test append to the real ~/.tmux-agents/events.jsonl."""
+    path = tmp_path_factory.mktemp("events") / "events.jsonl"
+    monkeypatch.setenv("TMUX_AGENTS_EVENTS", str(path))
+    return path

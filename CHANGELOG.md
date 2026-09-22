@@ -1,5 +1,34 @@
 # Changelog
 
+## 0.3.1 — 2026-09-23
+
+The hook grew an exit: what an agent finishes locally can now be seen from outside
+the machine.
+
+- **One hook for Claude Code and Codex.** `tmux-agents hook --agent codex` accepts
+  Codex's `notify` shape (an `agent-turn-complete` JSON object passed as an
+  argument, last assistant message in the payload) alongside Claude Code's `Stop`
+  shape (`{"transcript_path": ...}` on stdin), and normalizes both into the same
+  event. A pipeline can mix Claude Code and Codex panes.
+- **An event log.** Every finished turn appends one JSON line to
+  `~/.tmux-agents/events.jsonl` (`--events`, `TMUX_AGENTS_EVENTS`, `--no-events`):
+  `{ts, agent, session, pane, stage, status, message, handoff, next}`. `status` is
+  `DONE`/`STOPPED` from the marker, or `TURN` when the turn carried none; `message`
+  is the last assistant message clipped to its last 8 KB; `handoff` is the
+  `handoff.md` path mentioned in it, if any.
+- **`--notify <spec>`**, repeatable, pushes each event out to `file:/abs/path.log`,
+  `gist:<id>[:<file>]`, `repo:<owner/name>[:<path>]` (both through `gh`) or
+  `url:https://...` (POST). The pushed line is fixed —
+  `<ISO8601Z> <session>/<pane_title> <STAGE> <DONE|STOPPED|TURN> next=<prompt>|PAUSE|none`
+  — and independent of the pipeline: a stage that is not in the pipeline file, or no
+  pipeline file at all, is still reported. One retry, a 3-second timeout, failures on
+  stderr only; the next stage goes into the pane even when every sink is down.
+- **`events_read(since_line)`**, a new MCP tool, hands those events to an
+  orchestrator that has no shell on the machine, `next_since` at a time.
+- `--pipeline` is now optional (`--notify` or the event log alone is a valid reason
+  to run the hook), and `examples/` has a Claude Code `settings.json` and a Codex
+  `config.toml` side by side.
+
 ## 0.3.0 — 2026-09-23
 
 Everything here comes from running the server behind a remote bridge, where a tool
